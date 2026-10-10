@@ -3,7 +3,7 @@ import tkinter as tk
 from ui import theme
 from ui.file_tree import FileTree
 from ui.header import Header
-from ui.note_editor import NoteEditor
+from ui.query_panel import QueryPanel
 
 
 class MainWindow(tk.Tk):
@@ -28,13 +28,14 @@ class MainWindow(tk.Tk):
         panes.pack(fill="both", expand=True)
 
         tree = FileTree(panes, controller)
-        editor = NoteEditor(panes, controller)
+        query = QueryPanel(panes, controller)
         panes.add(tree, minsize=280, width=440)
-        panes.add(editor, minsize=240, width=500)
+        panes.add(query, minsize=240, width=500)
 
         controller.on_status = header.set_status
         controller.on_progress = header.set_progress
-        controller.on_note_loaded = editor.show_note
         controller.on_data_reset = tree.reload
+        controller.on_query_opened = query.show_query
+        controller.on_answer = query.show_answer
 
         tree.reload()

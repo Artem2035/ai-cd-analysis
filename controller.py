@@ -1,38 +1,150 @@
 from __future__ import annotations
 
+import os
+import queue
+import sqlite3
 from typing import Callable
 
+import config
 from catalog import Catalog
 from demo_data import load_demo
 from models import FileEntry, SortSpec
+from query_template import build_query
 from services import NetworkService
-
-PAGE_SIZE = 1000  # строк за раз, дальше «Показать ещё…»
+from wiztree_import import WizTreeImport
 
 
 def _noop(*args) -> None:
     pass
 
 
+def _fmt(n: int) -> str:
+    return f"{n:,}".replace(",", " ")
+
+
 class Controller:
-    def __init__(self, catalog: Catalog, network: NetworkService):
+    def __init__(self, catalog: Catalog, network: NetworkService,
+                 schedule: Callable[[int, Callable[[], None]], object],
+                 base_dir: str):
         self.catalog = catalog
-        self.network = network
+        self.network = network      # пока не используется: подключится на этапе 3
+        self._schedule = schedule   # root.after
+        self.base_dir = base_dir
 
         self.sort = SortSpec()
         self.selected_id: int | None = None
         self.expanded: set[int] = set()
-        self.notes: dict[int, str] = {}     # позже заменится классом с load/save
-        self.answers: dict[int, str] = {}   # ответы «?» (куда их показывать — пока не решено)
-        self.dirty = False                  # есть несохранённые изменения заметки
-        self._draft = ""
-        self._pending: set[int] = set()
+        self.query_id: int | None = None   # элемент, открытый в панели запроса
+        self._import: WizTreeImport | None = None
 
         # Колбэки, которые подключает UI
         self.on_status: Callable[[str], None] = _noop
         self.on_progress: Callable[[int], None] = _noop
-        self.on_note_loaded: Callable[[int | None, str, str], None] = _noop
         self.on_data_reset: Callable[[], None] = _noop
+        self.on_query_opened: Callable[[int | None, str, str], None] = _noop
+        self.on_answer: Callable[[str], None] = _noop
+
+    # ---------- запуск ----------
+    def startup(self) -> None:
+        """Открыть базу или загрузить CSV (вызывается после attach)."""
+        csv_path = os.path.join(self.base_dir, config.CSV_NAME)
+        db_path = csv_path + ".db"
+
+        has_db = os.path.isfile(db_path)
+        if has_db:
+            try:
+                self.catalog.open(db_path)
+            except sqlite3.Error:
+                has_db = False  # повреждённая база будет заменена импортом
+
+        if os.path.isfile(csv_path) and not (has_db and self._is_actual(csv_path)):
+            if has_db:
+                self.on_data_reset()  # старые данные видны, пока идёт импорт
+            self._start_import(csv_path, db_path)
+            return
+
+        self.on_data_reset()
+        if has_db:
+            self.on_progress(100)
+            self.on_status("База открыта")
+        else:
+            self.on_status(f"Файл экспорта не найден: {config.CSV_NAME}")
+
+    def start_demo(self) -> None:
+        """Режим python main.py --demo."""
+        self.load_demo()
+        self.on_data_reset()
+        self.on_progress(100)
+        self.on_status("Демонстрационный режим")
+
+    def shutdown(self) -> None:
+        """Закрытие окна: отменить импорт, дождаться удаления .tmp."""
+        if self._import:
+            self._import.cancel()
+            self._import.join(2.0)
+
+    def _is_actual(self, csv_path: str) -> bool:
+        """База соответствует CSV, если совпали размер и время изменения."""
+        st = os.stat(csv_path)
+        return (self.catalog.meta("source_size") == str(st.st_size)
+                and self.catalog.meta("source_mtime") == str(st.st_mtime_ns))
+
+    # ---------- импорт ----------
+    def _start_import(self, csv_path: str, db_path: str) -> None:
+        self._import = WizTreeImport(csv_path, db_path)
+        self._import.start()
+        self.on_progress(0)
+        self.on_status("Импорт CSV…")
+        self._schedule(config.POLL_MS, self._poll)
+
+    def _poll(self) -> None:
+        """Читает очередь потока; Tkinter из потока не вызывается."""
+        job = self._import
+        if job is None:
+            return
+        final = None
+        try:
+            while True:
+                msg = job.messages.get_nowait()
+                if msg[0] == "progress":
+                    self.on_progress(msg[1])
+                    self.on_status(msg[2])
+                else:
+                    final = msg
+                    break
+        except queue.Empty:
+            pass
+        if final is None:
+            self._schedule(config.POLL_MS, self._poll)
+            return
+        self._import = None
+        self._finish_import(job, final)
+
+    def _finish_import(self, job: WizTreeImport, msg: tuple) -> None:
+        kind = msg[0]
+        if kind == "done":
+            try:
+                self.catalog.replace_with(job.tmp_path, job.db_path)
+            except OSError as exc:
+                self.on_progress(0)
+                self.on_status(f"Не удалось заменить базу: {exc}")
+                return
+            self._reset_state()  # id изменились: выбор и запрос больше не верны
+            self.on_data_reset()
+            self.on_progress(100)
+            self.on_status(f"Загружено {_fmt(msg[1])}, пропущено {_fmt(msg[2])}")
+        elif kind == "error":
+            self.on_progress(0)
+            self.on_status(f"Ошибка импорта: {msg[1]}")
+        else:  # cancelled
+            self.on_progress(0)
+            self.on_status("Импорт отменён")
+
+    def _reset_state(self) -> None:
+        self.selected_id = None
+        self.expanded.clear()
+        self.query_id = None
+        self.on_query_opened(None, "", "")
 
     # ---------- данные ----------
     def load_demo(self) -> None:
@@ -42,8 +154,9 @@ class Controller:
     def children(self, parent_id: int | None, offset: int = 0
                  ) -> tuple[list[FileEntry], bool]:
         """Страница дочерних записей и признак «есть ещё»."""
-        rows = self.catalog.children(parent_id, self.sort, PAGE_SIZE + 1, offset)
-        return rows[:PAGE_SIZE], len(rows) > PAGE_SIZE
+        rows = self.catalog.children(parent_id, self.sort,
+                                     config.PAGE_SIZE + 1, offset)
+        return rows[:config.PAGE_SIZE], len(rows) > config.PAGE_SIZE
 
     def toggle(self, entry_id: int, opened: bool) -> None:
         if opened:
@@ -59,69 +172,27 @@ class Controller:
             self.sort.field = field
             self.sort.descending = field != "name"  # имена — по возрастанию
 
-    # ---------- заметки ----------
     def select(self, entry_id: int | None) -> None:
-        if entry_id == self.selected_id:
-            return
-        self._autosave()
-        entry = self.catalog.entry(entry_id) if entry_id is not None else None
-        self.selected_id = entry.id if entry else None
-        self.dirty = False
-        if entry:
-            self._draft = self.notes.get(entry.id, "")
-            self.on_note_loaded(entry.id, entry.path, self._draft)
-        else:
-            self._draft = ""
-            self.on_note_loaded(None, "", "")
-
-    def note_edited(self, text: str) -> None:
-        """Редактор сообщает о каждом изменении текста."""
-        if self.selected_id is None:
-            return
-        self._draft = text
-        self.dirty = text != self.notes.get(self.selected_id, "")
-
-    def save_note(self, text: str) -> None:
-        if self.selected_id is None:
-            self.on_status("Сначала выберите элемент дерева")
-            return
-        self._store(text)
-        self.on_status("Ответ сохранён")
-
-    def _autosave(self) -> None:
-        """При смене элемента несохранённый текст сохраняется, а не теряется."""
-        if self.selected_id is not None and self.dirty:
-            self._store(self._draft)
-            self.on_status("Заметка сохранена автоматически")
-
-    def _store(self, text: str) -> None:
-        if text:
-            self.notes[self.selected_id] = text
-        else:
-            self.notes.pop(self.selected_id, None)
-        self._draft = text
-        self.dirty = False
+        """Выбор строки дерева (нужен, чтобы выбор переживал перерисовку)."""
+        self.selected_id = entry_id
 
     # ---------- «?» и анализ ----------
     def ask(self, entry_id: int) -> None:
+        """«?» в строке: открыть панель запроса для элемента (запрос не выполняется)."""
         entry = self.catalog.entry(entry_id)
-        if entry is None or entry_id in self._pending:
+        if entry is None:
             return
-        self._pending.add(entry_id)
-        self.on_status(f"Запрос: {entry.name}…")
+        self.query_id = entry.id
+        self.on_query_opened(entry.id, entry.path, build_query(entry))
+        self.on_status(f"Запрос подготовлен: {entry.name}")
 
-        def done(answer: str) -> None:
-            self._pending.discard(entry_id)
-            self.answers[entry_id] = answer
-            self.on_status(f"Ответ получен: {entry.name}")
-
-        self.network.ask(entry, done)
+    def run_query(self) -> None:
+        """Кнопка «Выполнить». Заглушка: логика запроса будет на этапе 3."""
+        if self.query_id is None:
+            self.on_status("Сначала нажмите «?» у элемента дерева")
+            return
+        self.on_status("Выполнение запроса: пока не реализовано")
 
     def start_analysis(self) -> None:
-        # Этап 1: демо-режим. На этапе 2 здесь будет импорт CSV
-        self.select(None)
-        self.expanded.clear()
-        self.load_demo()
-        self.on_data_reset()
-        self.on_progress(100)
-        self.on_status("Демонстрационный режим")
+        # Заглушка: позже здесь запустится WizTree и создаст CSV
+        self.on_status("Пока не реализовано")
