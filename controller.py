@@ -13,8 +13,7 @@ from data.models import FileEntry, SortSpec
 from data.wiztree_import import WizTreeImport
 from llm.client import LlmError, NetworkService
 from llm.limiter import Limiter
-from llm.prompts import (SCHEMA_TEXT, SYSTEM_PROMPT, build_query,
-                         format_answer)
+from llm.prompts import SCHEMA_TEXT, build_query, format_answer
 
 CHARS_PER_TOKEN = 2.5  # грубая оценка для русского текста (с запасом)
 
@@ -248,7 +247,7 @@ class Controller:
         self.on_answer(text + (f"\n\n{detail}" if detail else ""))
 
     def run_query(self, text: str) -> None:
-        """Кнопка «Выполнить»: text уже содержит правки пользователя."""
+        """Кнопка «Выполнить»: text — весь промт из поля, с правками пользователя."""
         if self._asking:
             return
         if self.query_id is None:
@@ -262,7 +261,8 @@ class Controller:
             self._query_error("Не задан GROQ_API_KEY: добавьте ключ в файл .env")
             return
 
-        chars = len(SYSTEM_PROMPT) + len(SCHEMA_TEXT) + len(text)
+        # промт целиком в text; схема уходит отдельно в response_format
+        chars = len(SCHEMA_TEXT) + len(text)
         estimate = int(chars / CHARS_PER_TOKEN) + config.MAX_OUTPUT_TOKENS
         try:
             wait = self.limiter.check(estimate)
@@ -271,7 +271,8 @@ class Controller:
             return
         if wait > 0:
             self._query_error(
-                f"Лимит запросов: повторите через {math.ceil(wait)} с")
+                f"Лимит текущей минуты исчерпан, повторите через "
+                f"{math.ceil(wait)} с")
             return
 
         target = self.query_id
@@ -281,7 +282,7 @@ class Controller:
         self.on_answer("Ожидание ответа…")
         self.on_status("Запрос отправлен…")
         self.network.ask(
-            SYSTEM_PROMPT, text,
+            text,
             on_done=lambda *r: self._on_reply(target, ticket, *r),
             on_error=lambda err: self._on_failure(target, ticket, err))
 
@@ -313,7 +314,7 @@ class Controller:
     def _on_failure(self, target: int, ticket: list, err: LlmError) -> None:
         self._asking = False
         self.on_query_busy(False)
-        if err.kind != "rate":  # при 429 оставляем оценку: окно считаем осторожно
+        if err.kind != "rate":  # при 429 оставляем оценку: минуту считаем осторожно
             self.limiter.finish(ticket, 0)
         if target != self.query_id:
             self.on_status(err.message)

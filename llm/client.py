@@ -72,13 +72,14 @@ class NetworkService:
         self._schedule = schedule  # root.after
         self._strict = True        # после отказа 400 переходим на json_object
 
-    def ask(self, system: str, user: str,
+    def ask(self, prompt: str,
             on_done: Callable[[str, int, int, str], None],
             on_error: Callable[[LlmError], None]) -> None:
-        """on_done(текст, токены входа, токены выхода, finish_reason);
+        """prompt уходит одним сообщением user.
+        on_done(текст, токены входа, токены выхода, finish_reason);
         оба колбэка вызываются в потоке UI."""
         box: queue.Queue = queue.Queue()
-        threading.Thread(target=self._run, args=(system, user, box),
+        threading.Thread(target=self._run, args=(prompt, box),
                          daemon=True).start()  # daemon: окно закрывается сразу
         self._schedule(config.POLL_MS,
                        lambda: self._poll(box, on_done, on_error))
@@ -97,22 +98,22 @@ class NetworkService:
             on_error(item[1])
 
     # ---------- рабочий поток ----------
-    def _run(self, system: str, user: str, box: queue.Queue) -> None:
+    def _run(self, prompt: str, box: queue.Queue) -> None:
         try:
-            box.put(("ok", *self._request(system, user)))
+            box.put(("ok", *self._request(prompt)))
         except LlmError as exc:
             box.put(("error", exc))
         except Exception as exc:  # чтобы UI не остался в ожидании
             box.put(("error", LlmError(f"Непредвиденная ошибка: {exc}")))
 
-    def _request(self, system: str, user: str) -> tuple[str, int, int, str]:
+    def _request(self, prompt: str) -> tuple[str, int, int, str]:
         try:
-            data = self._post(system, user, self._strict)
+            data = self._post(prompt, self._strict)
         except LlmError as exc:
             if exc.kind != "format" or not self._strict:
                 raise
             self._strict = False  # запоминаем до перезапуска
-            data = self._post(system, user, False)
+            data = self._post(prompt, False)
         try:
             choice = data["choices"][0]
             content = choice["message"].get("content") or ""
@@ -123,11 +124,10 @@ class NetworkService:
         except (KeyError, IndexError, TypeError, ValueError):
             raise LlmError("Неожиданный формат ответа сервера") from None
 
-    def _post(self, system: str, user: str, strict: bool) -> dict:
+    def _post(self, prompt: str, strict: bool) -> dict:
         body = {
             "model": config.GROQ_MODEL,
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": user}],
+            "messages": [{"role": "user", "content": prompt}],
             "max_completion_tokens": config.MAX_OUTPUT_TOKENS,
             "response_format": _response_format(strict),
         }

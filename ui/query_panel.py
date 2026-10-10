@@ -13,7 +13,7 @@ def _text(parent, height=None, state="disabled") -> tk.Text:
 
 
 class QueryPanel(tk.Frame):
-    """Правая панель: редактируемый запрос, поле ответа, кнопка «Выполнить»."""
+    """Правая панель: редактируемый промт, поле ответа, кнопка «Выполнить»."""
 
     def __init__(self, parent, controller):
         super().__init__(parent, bg=theme.PANEL)
@@ -37,8 +37,15 @@ class QueryPanel(tk.Frame):
                                font=theme.font(9), anchor="w", justify="left")
         self.target.pack(anchor="w", fill="x", pady=(5, 0))
 
-        self.query = _text(self, height=6)  # редактируется, когда выбран элемент
-        self.query.pack(fill="x", padx=18)
+        # Полный промт (инструкции + данные): длинный, поэтому с прокруткой
+        qbox = tk.Frame(self, bg=theme.PANEL)
+        qbox.pack(fill="x", padx=18)
+        qscroll = ttk.Scrollbar(qbox, orient="vertical")
+        self.query = _text(qbox, height=8)  # редактируется, когда выбран элемент
+        self.query.configure(yscrollcommand=qscroll.set)
+        qscroll.configure(command=self.query.yview)
+        qscroll.pack(side="right", fill="y")
+        self.query.pack(side="left", fill="x", expand=True)
 
         tk.Label(self, text="Ответ", bg=theme.PANEL, fg=theme.MUTED,
                  font=theme.font(9, True)).pack(anchor="w", padx=18,
