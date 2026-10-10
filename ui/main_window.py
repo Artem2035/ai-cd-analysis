@@ -51,6 +51,7 @@ class MainWindow(tk.Tk):
         controller.on_result = self.set_result
         controller.on_data_reset = tree.reload
         controller.on_query_opened = query.show_query
+        controller.on_query_busy = query.set_busy
         controller.on_answer = query.show_answer
 
         tree.reload()

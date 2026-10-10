@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import queue
 import sqlite3
@@ -9,9 +10,13 @@ import config
 from data.catalog import Catalog
 from data.demo_data import load_demo
 from data.models import FileEntry, SortSpec
-from llm.prompts import build_query
-from llm.client import NetworkService
 from data.wiztree_import import WizTreeImport
+from llm.client import LlmError, NetworkService
+from llm.limiter import Limiter
+from llm.prompts import (SCHEMA_TEXT, SYSTEM_PROMPT, build_query,
+                         format_answer)
+
+CHARS_PER_TOKEN = 2.5  # грубая оценка для русского текста (с запасом)
 
 
 def _noop(*args) -> None:
@@ -27,17 +32,19 @@ class Controller:
                  schedule: Callable[[int, Callable[[], None]], object],
                  base_dir: str):
         self.catalog = catalog
-        self.network = network      # пока не используется: подключится на этапе 3
+        self.network = network
         self._schedule = schedule   # root.after
         self.base_dir = base_dir
         self.csv_path = os.path.join(base_dir, config.CSV_NAME)
         self.db_path = os.path.join(base_dir, config.DB_NAME)
+        self.limiter = Limiter(config.LIMIT_TPM, config.LIMIT_RPM)
 
         self.sort = SortSpec()
         self.selected_id: int | None = None
         self.expanded: set[int] = set()
         self.query_id: int | None = None   # элемент, открытый в панели запроса
         self._import: WizTreeImport | None = None
+        self._asking = False               # идёт запрос к модели
 
         # Колбэки, которые подключает UI
         self.on_status: Callable[[str], None] = _noop
@@ -46,6 +53,7 @@ class Controller:
         self.on_result: Callable[[str, bool], None] = _noop
         self.on_data_reset: Callable[[], None] = _noop
         self.on_query_opened: Callable[[int | None, str, str], None] = _noop
+        self.on_query_busy: Callable[[bool], None] = _noop
         self.on_answer: Callable[[str], None] = _noop
 
     # ---------- запуск ----------
@@ -69,7 +77,8 @@ class Controller:
         self.on_result("Демонстрационный режим: данные в памяти", False)
 
     def shutdown(self) -> None:
-        """Закрытие окна: отменить импорт, дождаться удаления .tmp."""
+        """Закрытие окна: отменить импорт, дождаться удаления .tmp.
+        Запрос к модели в daemon-потоке: он не мешает закрытию."""
         if self._import:
             self._import.cancel()
             self._import.join(2.0)
@@ -223,6 +232,9 @@ class Controller:
     # ---------- «?» и запрос ----------
     def ask(self, entry_id: int) -> None:
         """«?» в строке: открыть панель запроса для элемента (запрос не выполняется)."""
+        if self._asking:  # ответ должен относиться к тому элементу, для которого отправлен
+            self.on_status("Дождитесь ответа на текущий запрос")
+            return
         entry = self.catalog.entry(entry_id)
         if entry is None:
             return
@@ -230,9 +242,80 @@ class Controller:
         self.on_query_opened(entry.id, entry.path, build_query(entry))
         self.on_status(f"Запрос подготовлен: {entry.name}")
 
+    def _query_error(self, text: str, detail: str = "") -> None:
+        """Ошибка запроса: кратко в статус, полностью в поле ответа."""
+        self.on_status(text)
+        self.on_answer(text + (f"\n\n{detail}" if detail else ""))
+
     def run_query(self, text: str) -> None:
-        """Кнопка «Выполнить». Заглушка: text уже содержит правки пользователя."""
+        """Кнопка «Выполнить»: text уже содержит правки пользователя."""
+        if self._asking:
+            return
         if self.query_id is None:
             self.on_status("Сначала нажмите «?» у элемента дерева")
             return
-        self.on_status("Выполнение запроса: пока не реализовано")
+        text = text.strip()
+        if not text:
+            self.on_status("Запрос пуст")
+            return
+        if not config.GROQ_API_KEY:
+            self._query_error("Не задан GROQ_API_KEY: добавьте ключ в файл .env")
+            return
+
+        chars = len(SYSTEM_PROMPT) + len(SCHEMA_TEXT) + len(text)
+        estimate = int(chars / CHARS_PER_TOKEN) + config.MAX_OUTPUT_TOKENS
+        try:
+            wait = self.limiter.check(estimate)
+        except ValueError as exc:
+            self._query_error(str(exc))
+            return
+        if wait > 0:
+            self._query_error(
+                f"Лимит запросов: повторите через {math.ceil(wait)} с")
+            return
+
+        target = self.query_id
+        ticket = self.limiter.start(estimate)
+        self._asking = True
+        self.on_query_busy(True)
+        self.on_answer("Ожидание ответа…")
+        self.on_status("Запрос отправлен…")
+        self.network.ask(
+            SYSTEM_PROMPT, text,
+            on_done=lambda *r: self._on_reply(target, ticket, *r),
+            on_error=lambda err: self._on_failure(target, ticket, err))
+
+    def _on_reply(self, target: int, ticket: list, content: str,
+                  prompt_tokens: int, completion_tokens: int,
+                  finish: str) -> None:
+        self._asking = False
+        self.on_query_busy(False)
+        total = prompt_tokens + completion_tokens
+        self.limiter.finish(ticket, total)
+        usage = (f"Токены: {_fmt(total)} "
+                 f"(вход {_fmt(prompt_tokens)}, выход {_fmt(completion_tokens)})")
+        self.on_status(usage)
+        if target != self.query_id:  # элемент сменился (например, база переоткрыта)
+            return
+        if finish == "length":
+            self.on_answer("Ответ обрезан: достигнут MAX_OUTPUT_TOKENS. "
+                           "Увеличьте значение в .env.\n\nСырой ответ:\n"
+                           + (content or "(пусто)"))
+            self.on_status("Ответ обрезан · " + usage)
+            return
+        try:
+            self.on_answer(format_answer(content))
+        except ValueError as exc:
+            self.on_answer(f"Не удалось разобрать ответ ({exc}).\n\n"
+                           f"Сырой ответ:\n{content or '(пусто)'}")
+            self.on_status("Ответ не разобран · " + usage)
+
+    def _on_failure(self, target: int, ticket: list, err: LlmError) -> None:
+        self._asking = False
+        self.on_query_busy(False)
+        if err.kind != "rate":  # при 429 оставляем оценку: окно считаем осторожно
+            self.limiter.finish(ticket, 0)
+        if target != self.query_id:
+            self.on_status(err.message)
+            return
+        self._query_error(err.message, err.detail)

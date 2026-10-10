@@ -17,6 +17,8 @@ class QueryPanel(tk.Frame):
 
     def __init__(self, parent, controller):
         super().__init__(parent, bg=theme.PANEL)
+        self._has_query = False  # выбран ли элемент
+        self._busy = False       # идёт запрос к модели
 
         # Нижняя полоса упаковывается первой: кнопка всегда остаётся видимой,
         # при нехватке места сжимается поле ответа
@@ -55,6 +57,11 @@ class QueryPanel(tk.Frame):
     def _on_run(self) -> None:
         self.controller.run_query(self.query.get("1.0", "end-1c"))
 
+    def _refresh_run(self) -> None:
+        """Кнопка активна, только если выбран элемент и нет запроса в работе."""
+        ok = self._has_query and not self._busy
+        self.run.state(["!disabled"] if ok else ["disabled"])
+
     @staticmethod
     def _set(widget: tk.Text, text: str) -> None:
         """Заменяет текст, сохраняя состояние (normal/disabled) поля."""
@@ -67,17 +74,22 @@ class QueryPanel(tk.Frame):
     def show_query(self, entry_id, path: str, text: str) -> None:
         """Колбэк контроллера on_query_opened (None — элемент не выбран)."""
         self._set(self.answer, "")
+        self._has_query = entry_id is not None
         if entry_id is None:
             self.target.configure(text="Нажмите «?» у элемента дерева")
             self.query.configure(state="disabled")
             self._set(self.query, "")
-            self.run.state(["disabled"])
         else:
             self.target.configure(text=path)
             self.query.configure(state="normal")
             self._set(self.query, text)
-            self.run.state(["!disabled"])
+        self._refresh_run()
+
+    def set_busy(self, busy: bool) -> None:
+        """Колбэк контроллера on_query_busy: блокировка на время запроса."""
+        self._busy = busy
+        self._refresh_run()
 
     def show_answer(self, text: str) -> None:
-        """Колбэк контроллера on_answer (будет использован на этапе 3)."""
+        """Колбэк контроллера on_answer."""
         self._set(self.answer, text)
