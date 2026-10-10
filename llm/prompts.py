@@ -1,6 +1,6 @@
 """Шаблон запроса по «?». Текст примерный: уточняется на этапе реального запроса."""
 from columns import format_size
-from models import FileEntry
+from data.models import FileEntry
 
 QUERY_TEMPLATE = (
     "Что это за объект ({kind}) и безопасно ли его удалить?\n"

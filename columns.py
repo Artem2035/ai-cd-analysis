@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from models import FileEntry
+from data.models import FileEntry
 
 ASK_ID = "ask"  # колонка «?» (её нельзя скрыть)
 

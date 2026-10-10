@@ -6,12 +6,12 @@ import sqlite3
 from typing import Callable
 
 import config
-from catalog import Catalog
-from demo_data import load_demo
-from models import FileEntry, SortSpec
-from query_template import build_query
-from services import NetworkService
-from wiztree_import import WizTreeImport
+from data.catalog import Catalog
+from data.demo_data import load_demo
+from data.models import FileEntry, SortSpec
+from llm.prompts import build_query
+from llm.client import NetworkService
+from data.wiztree_import import WizTreeImport
 
 
 def _noop(*args) -> None:
@@ -30,6 +30,8 @@ class Controller:
         self.network = network      # пока не используется: подключится на этапе 3
         self._schedule = schedule   # root.after
         self.base_dir = base_dir
+        self.csv_path = os.path.join(base_dir, config.CSV_NAME)
+        self.db_path = os.path.join(base_dir, config.DB_NAME)
 
         self.sort = SortSpec()
         self.selected_id: int | None = None
@@ -40,35 +42,23 @@ class Controller:
         # Колбэки, которые подключает UI
         self.on_status: Callable[[str], None] = _noop
         self.on_progress: Callable[[int], None] = _noop
+        self.on_busy: Callable[[bool], None] = _noop
+        self.on_result: Callable[[str, bool], None] = _noop
         self.on_data_reset: Callable[[], None] = _noop
         self.on_query_opened: Callable[[int | None, str, str], None] = _noop
         self.on_answer: Callable[[str], None] = _noop
 
     # ---------- запуск ----------
     def startup(self) -> None:
-        """Открыть базу или загрузить CSV (вызывается после attach)."""
-        csv_path = os.path.join(self.base_dir, config.CSV_NAME)
-        db_path = csv_path + ".db"
-
-        has_db = os.path.isfile(db_path)
-        if has_db:
-            try:
-                self.catalog.open(db_path)
-            except sqlite3.Error:
-                has_db = False  # повреждённая база будет заменена импортом
-
-        if os.path.isfile(csv_path) and not (has_db and self._is_actual(csv_path)):
-            if has_db:
-                self.on_data_reset()  # старые данные видны, пока идёт импорт
-            self._start_import(csv_path, db_path)
+        """При запуске только открывает готовую базу; импорт не стартует."""
+        if os.path.isfile(self.db_path):
+            self.refresh_db()
             return
-
-        self.on_data_reset()
-        if has_db:
-            self.on_progress(100)
-            self.on_status("База открыта")
+        if os.path.isfile(self.csv_path):
+            self.on_status("Нажмите «Обновить из CSV»")
         else:
             self.on_status(f"Файл экспорта не найден: {config.CSV_NAME}")
+        self.on_result("Данные не загружены", False)
 
     def start_demo(self) -> None:
         """Режим python main.py --demo."""
@@ -76,6 +66,7 @@ class Controller:
         self.on_data_reset()
         self.on_progress(100)
         self.on_status("Демонстрационный режим")
+        self.on_result("Демонстрационный режим: данные в памяти", False)
 
     def shutdown(self) -> None:
         """Закрытие окна: отменить импорт, дождаться удаления .tmp."""
@@ -89,10 +80,59 @@ class Controller:
         return (self.catalog.meta("source_size") == str(st.st_size)
                 and self.catalog.meta("source_mtime") == str(st.st_mtime_ns))
 
+    def _error(self, text: str) -> None:
+        """Ошибка: подробности в поле итога (красным), в статусе кратко."""
+        self.on_status("Ошибка")
+        self.on_result(text, True)
+
+    # ---------- команды шапки ----------
+    def refresh_db(self) -> None:
+        """«Обновить из базы»: переоткрыть .db без импорта."""
+        if self._import:
+            return
+        if not os.path.isfile(self.db_path):
+            self._error(f"База не найдена: {config.DB_NAME}")
+            return
+        try:
+            self.catalog.open(self.db_path)
+        except sqlite3.Error as exc:
+            self._error(f"Не удалось открыть базу: {exc}")
+            return
+        self._reset_state()  # id могли измениться: выбор и запрос неверны
+        self.on_data_reset()
+        self.on_progress(100)
+        note = ""
+        if os.path.isfile(self.csv_path) and not self._is_actual(self.csv_path):
+            note = " (CSV изменился, база может быть устаревшей)"
+        self.on_status("База открыта")
+        self.on_result(f"База открыта: {config.DB_NAME}{note}", False)
+
+    def refresh_csv(self) -> None:
+        """«Обновить из CSV»: прочитать файл и записать в базу."""
+        if self._import:
+            return
+        if not os.path.isfile(self.csv_path):
+            self._error(f"Файл не найден: {config.CSV_NAME}")
+            return
+        self._start_import(self.csv_path, self.db_path)
+
+    def cancel_import(self) -> None:
+        """«Отмена импорта»: итог придёт из очереди как «cancelled»."""
+        if self._import:
+            self._import.cancel()
+            self.on_status("Отмена импорта…")
+
+    def start_analysis(self) -> None:
+        # Заглушка: позже здесь запустится WizTree и создаст CSV
+        if self._import:
+            return
+        self.on_status("Пока не реализовано")
+
     # ---------- импорт ----------
     def _start_import(self, csv_path: str, db_path: str) -> None:
         self._import = WizTreeImport(csv_path, db_path)
         self._import.start()
+        self.on_busy(True)
         self.on_progress(0)
         self.on_status("Импорт CSV…")
         self._schedule(config.POLL_MS, self._poll)
@@ -121,24 +161,28 @@ class Controller:
         self._finish_import(job, final)
 
     def _finish_import(self, job: WizTreeImport, msg: tuple) -> None:
+        self.on_busy(False)  # единая точка: успех, ошибка и отмена
         kind = msg[0]
         if kind == "done":
             try:
                 self.catalog.replace_with(job.tmp_path, job.db_path)
             except OSError as exc:
                 self.on_progress(0)
-                self.on_status(f"Не удалось заменить базу: {exc}")
+                self._error(f"Не удалось заменить базу: {exc}")
                 return
             self._reset_state()  # id изменились: выбор и запрос больше не верны
             self.on_data_reset()
             self.on_progress(100)
-            self.on_status(f"Загружено {_fmt(msg[1])}, пропущено {_fmt(msg[2])}")
+            self.on_status("Импорт завершён")
+            self.on_result(
+                f"Загружено {_fmt(msg[1])}, пропущено {_fmt(msg[2])}", False)
         elif kind == "error":
             self.on_progress(0)
-            self.on_status(f"Ошибка импорта: {msg[1]}")
+            self._error(f"Ошибка импорта: {msg[1]}")
         else:  # cancelled
             self.on_progress(0)
             self.on_status("Импорт отменён")
+            self.on_result("Импорт отменён, прежние данные не изменены", False)
 
     def _reset_state(self) -> None:
         self.selected_id = None
@@ -176,7 +220,7 @@ class Controller:
         """Выбор строки дерева (нужен, чтобы выбор переживал перерисовку)."""
         self.selected_id = entry_id
 
-    # ---------- «?» и анализ ----------
+    # ---------- «?» и запрос ----------
     def ask(self, entry_id: int) -> None:
         """«?» в строке: открыть панель запроса для элемента (запрос не выполняется)."""
         entry = self.catalog.entry(entry_id)
@@ -186,13 +230,9 @@ class Controller:
         self.on_query_opened(entry.id, entry.path, build_query(entry))
         self.on_status(f"Запрос подготовлен: {entry.name}")
 
-    def run_query(self) -> None:
-        """Кнопка «Выполнить». Заглушка: логика запроса будет на этапе 3."""
+    def run_query(self, text: str) -> None:
+        """Кнопка «Выполнить». Заглушка: text уже содержит правки пользователя."""
         if self.query_id is None:
             self.on_status("Сначала нажмите «?» у элемента дерева")
             return
         self.on_status("Выполнение запроса: пока не реализовано")
-
-    def start_analysis(self) -> None:
-        # Заглушка: позже здесь запустится WizTree и создаст CSV
-        self.on_status("Пока не реализовано")

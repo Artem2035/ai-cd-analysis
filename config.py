@@ -42,6 +42,7 @@ def _get_int(key: str, default: int) -> int:
     return value if value > 0 else default
 
 
-CSV_NAME = _get("CSV_NAME", "wiztree.csv")
+CSV_NAME = _get("CSV_NAME", "wiztree_result.csv")
+DB_NAME = _get("DB_NAME", "wiztree_result.db")
 PAGE_SIZE = _get_int("PAGE_SIZE", 1000)
 POLL_MS = _get_int("POLL_MS", 100)

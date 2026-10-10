@@ -4,7 +4,7 @@ import os
 import sqlite3
 from typing import Iterable
 
-from models import FileEntry, SortSpec
+from data.models import FileEntry, SortSpec
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS entries (

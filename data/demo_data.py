@@ -1,6 +1,6 @@
 import itertools
 
-from catalog import Catalog
+from data.catalog import Catalog
 
 KB = 1024
 MB = 1024 * KB

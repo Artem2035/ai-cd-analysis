@@ -1,6 +1,6 @@
 from typing import Callable
 
-from models import FileEntry
+from data.models import FileEntry
 
 
 class NetworkService:

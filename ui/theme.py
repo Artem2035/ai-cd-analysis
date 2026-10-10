@@ -10,6 +10,7 @@ ACCENT = "#4263EB"
 ACCENT_DARK = "#3451CA"
 SELECT = "#EDF1FF"
 HEAD_BG = "#F7F8FB"
+ERROR = "#C92A2A"
 
 _PREFERRED = ("Segoe UI", "SF Pro Text", "Helvetica Neue", "Noto Sans",
               "Ubuntu", "DejaVu Sans")
@@ -40,12 +41,23 @@ def setup_theme(root) -> None:
                     padding=(8, 8))
     style.map("Treeview.Heading", background=[("active", "#EEF1F7")])
 
-    # Кнопка с акцентом
+    # Кнопка с акцентом (первое подходящее состояние побеждает: disabled первым)
     style.configure("Accent.TButton", background=ACCENT, foreground="white",
                     font=font(10, True), borderwidth=0, focusthickness=0,
                     padding=(18, 9))
     style.map("Accent.TButton",
-              background=[("pressed", ACCENT_DARK), ("active", ACCENT_DARK)])
+              background=[("disabled", BORDER), ("pressed", ACCENT_DARK),
+                          ("active", ACCENT_DARK)],
+              foreground=[("disabled", MUTED)])
+
+    # Обычная кнопка шапки
+    style.configure("Plain.TButton", background=SELECT, foreground=ACCENT,
+                    font=font(10, True), borderwidth=0, focusthickness=0,
+                    padding=(14, 9))
+    style.map("Plain.TButton",
+              background=[("disabled", HEAD_BG), ("pressed", "#DCE5FF"),
+                          ("active", "#DCE5FF")],
+              foreground=[("disabled", MUTED)])
 
     # Прогресс и полоса прокрутки
     style.configure("Accent.Horizontal.TProgressbar", troughcolor=BORDER,

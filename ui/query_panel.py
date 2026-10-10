@@ -4,19 +4,28 @@ from tkinter import ttk
 from ui import theme
 
 
-def _readonly_text(parent, height=None) -> tk.Text:
+def _text(parent, height=None, state="disabled") -> tk.Text:
     opts = {"height": height} if height else {}
     return tk.Text(parent, wrap="word", font=theme.font(10), bg="#FCFCFE",
                    fg=theme.TEXT, relief="flat", padx=12, pady=12,
                    highlightthickness=1, highlightbackground=theme.BORDER,
-                   highlightcolor=theme.ACCENT, state="disabled", **opts)
+                   highlightcolor=theme.ACCENT, state=state, **opts)
 
 
 class QueryPanel(tk.Frame):
-    """Правая панель: запрос по «?», поле ответа, кнопка «Выполнить»."""
+    """Правая панель: редактируемый запрос, поле ответа, кнопка «Выполнить»."""
 
     def __init__(self, parent, controller):
         super().__init__(parent, bg=theme.PANEL)
+
+        # Нижняя полоса упаковывается первой: кнопка всегда остаётся видимой,
+        # при нехватке места сжимается поле ответа
+        bottom = tk.Frame(self, bg=theme.PANEL)
+        bottom.pack(side="bottom", fill="x", padx=18, pady=16)
+        self.run = ttk.Button(bottom, text="Выполнить", style="Accent.TButton",
+                              cursor="hand2", command=self._on_run)
+        self.run.pack(side="right")
+        self.controller = controller
 
         top = tk.Frame(self, bg=theme.PANEL)
         top.pack(fill="x", padx=18, pady=(16, 12))
@@ -26,7 +35,7 @@ class QueryPanel(tk.Frame):
                                font=theme.font(9), anchor="w", justify="left")
         self.target.pack(anchor="w", fill="x", pady=(5, 0))
 
-        self.query = _readonly_text(self, height=7)
+        self.query = _text(self, height=6)  # редактируется, когда выбран элемент
         self.query.pack(fill="x", padx=18)
 
         tk.Label(self, text="Ответ", bg=theme.PANEL, fg=theme.MUTED,
@@ -35,36 +44,37 @@ class QueryPanel(tk.Frame):
         box = tk.Frame(self, bg=theme.PANEL)
         box.pack(fill="both", expand=True, padx=18)
         scroll = ttk.Scrollbar(box, orient="vertical")
-        self.answer = _readonly_text(box)
+        self.answer = _text(box)
         self.answer.configure(yscrollcommand=scroll.set)
         scroll.configure(command=self.answer.yview)
         scroll.pack(side="right", fill="y")
         self.answer.pack(side="left", fill="both", expand=True)
 
-        bottom = tk.Frame(self, bg=theme.PANEL)
-        bottom.pack(fill="x", padx=18, pady=16)
-        self.run = ttk.Button(bottom, text="Выполнить", style="Accent.TButton",
-                              cursor="hand2", command=controller.run_query)
-        self.run.pack(side="right")
-
         self.show_query(None, "", "")
+
+    def _on_run(self) -> None:
+        self.controller.run_query(self.query.get("1.0", "end-1c"))
 
     @staticmethod
     def _set(widget: tk.Text, text: str) -> None:
+        """Заменяет текст, сохраняя состояние (normal/disabled) поля."""
+        state = str(widget.cget("state"))
         widget.configure(state="normal")
         widget.delete("1.0", "end")
         widget.insert("1.0", text)
-        widget.configure(state="disabled")
+        widget.configure(state=state)
 
     def show_query(self, entry_id, path: str, text: str) -> None:
         """Колбэк контроллера on_query_opened (None — элемент не выбран)."""
         self._set(self.answer, "")
         if entry_id is None:
             self.target.configure(text="Нажмите «?» у элемента дерева")
+            self.query.configure(state="disabled")
             self._set(self.query, "")
             self.run.state(["disabled"])
         else:
             self.target.configure(text=path)
+            self.query.configure(state="normal")
             self._set(self.query, text)
             self.run.state(["!disabled"])
 

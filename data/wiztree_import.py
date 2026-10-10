@@ -9,7 +9,7 @@ import sqlite3
 import threading
 from typing import Iterator
 
-from catalog import INDEX, INSERT_SQL, TABLES
+from data.catalog import INDEX, INSERT_SQL, TABLES
 
 BATCH = 50_000     # строк в одной вставке
 TICK = 20_000      # как часто слать прогресс и проверять отмену
