@@ -3,7 +3,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
-from columns import ASK_ID, COLUMNS, NAME_COLUMN
+from ui.columns import ASK_ID, COLUMNS, NAME_COLUMN
 from data.models import FileEntry
 
 from ui import theme

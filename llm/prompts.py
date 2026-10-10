@@ -1,5 +1,5 @@
 """Шаблон запроса по «?». Текст примерный: уточняется на этапе реального запроса."""
-from columns import format_size
+from data.format import format_size
 from data.models import FileEntry
 
 QUERY_TEMPLATE = (
